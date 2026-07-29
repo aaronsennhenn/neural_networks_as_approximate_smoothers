@@ -1,0 +1,347 @@
+---
+title: "Empirical evaluation"
+author: "Aaron Sennhenn"
+date: ''
+output:
+  html_document:
+    toc: true
+    df_print: paged
+    toc_float: true
+subtitle: Neural Networks as Approximate Smoothers
+---
+
+```{r setup, include=FALSE}
+#SET ROOT DIRECTORY
+knitr::opts_knit$set(
+  root.dir = "C:/Users/aaron/OneDrive/Desktop/Data Science Studium/Master Thesis/R/repo/")
+```
+
+This notebook evaluates the ridge and telescoping representations of neural networks on the Concrete Compressive Strength and California Housing datasets. The evaluation distinguishes between predictive performance relative to the observed outcomes and approximation quality relative to the original neural-network predictions. The experiments were executed on the bwUniCluster, and the saved prediction objects are loaded here for analysis and visualization.
+
+# 1. Load and unpack Results
+
+First, load packages
+
+```{r, message = FALSE, warning=FALSE}
+if (!require("dplyr")) install.packages("dplyr", dependencies = TRUE); library(dplyr)
+if (!require("ggplot2")) install.packages("ggplot2", dependencies = TRUE); library(ggplot2)
+if (!require("knitr")) install.packages("knitr", dependencies = TRUE); library(knitr)
+if (!require("xtable")) install.packages("xtable", dependencies = TRUE); library(xtable)
+if (!require("kableExtra")) install.packages("kableExtra", dependencies = TRUE); library(kableExtra)
+if (!require("gridExtra")) install.packages("gridExtra", dependencies = TRUE); library(gridExtra)
+```
+
+Next, load in results and compute error metrics
+
+```{r}
+error_metrics <- function(y, yhat) {
+  error = yhat - y
+  metrics <- c(
+    MAE = mean(abs(error)),
+    RMSE = sqrt(mean(error^2)),
+    MAPE = mean(abs(error/y)),
+    Q95 = as.numeric(quantile(abs(error), 0.95))
+  )
+}
+
+read_run_metrics <- function(results, model_name) {
+  
+  pred_name <- paste0("pred_", model_name) 
+  
+  run_rows <- lapply(seq_along(results), function(run_id) {
+    run <- results[[run_id]]
+
+    y_test <- as.numeric(run$y_test)
+    pred_ridge <- as.numeric(run[[pred_name]])
+    pred_fwd <- as.numeric(run$pred_fwd)
+
+    config <- lapply(run$config, paste, collapse = "_")
+    names(config) <- paste0("config_", names(config))
+
+    approx_metrics <- error_metrics(pred_fwd, pred_ridge)
+    base_metrics <- error_metrics(y_test, pred_ridge)
+    fwd_metrics <- error_metrics(y_test, pred_fwd)
+
+    metrics <- c(
+      setNames(approx_metrics, paste0("approx_", names(approx_metrics))),
+      setNames(base_metrics, paste0(model_name, "_", names(base_metrics))),
+      setNames(fwd_metrics, paste0("fwd_", names(fwd_metrics)))
+    )
+
+    c(list(run = run_id), config, as.list(metrics))
+  })
+
+  bind_rows(run_rows)
+}
+
+results_concrete_ridge <- readRDS("results/results_concrete_ridge.rds")
+results_california_ridge <- readRDS("results/results_cali_ridge.rds")
+results_concrete_tel <- readRDS("results/results_concrete_tel.rds")
+results_california_tel <- readRDS("results/results_cali_tel.rds")
+
+run_metrics_california_ridge <- read_run_metrics(results_california_ridge, "ridge")
+run_metrics_concrete_ridge <- read_run_metrics(results_concrete_ridge, "ridge")
+run_metrics_california_tel <- read_run_metrics(results_california_tel, "tel")
+run_metrics_concrete_tel <- read_run_metrics(results_concrete_tel, "tel")
+
+make_metric_rows <- function(x, dataset, method) {
+  data.frame(
+    Dataset = dataset,
+    run = x$run,
+    method = method,
+
+    MAE = x[[paste0(method, "_MAE")]],
+    RMSE = x[[paste0(method, "_RMSE")]],
+    MAPE = x[[paste0(method, "_MAPE")]],
+    Q95 = x[[paste0(method, "_Q95")]],
+
+    fwd_MAE = x$fwd_MAE,
+    fwd_RMSE = x$fwd_RMSE,
+    fwd_MAPE = x$fwd_MAPE,
+    fwd_Q95 = x$fwd_Q95,
+
+    approx_MAE = x$approx_MAE,
+    approx_RMSE = x$approx_RMSE,
+    approx_MAPE = x$approx_MAPE,
+    approx_Q95 = x$approx_Q95
+  )
+}
+
+all_run_metrics <- bind_rows(
+  make_metric_rows(run_metrics_california_ridge, "California", "ridge"),
+  make_metric_rows(run_metrics_concrete_ridge, "Concrete", "ridge"),
+  make_metric_rows(run_metrics_california_tel, "California", "tel"),
+  make_metric_rows(run_metrics_concrete_tel, "Concrete", "tel")
+)
+```
+
+# 2. Predictive performance
+
+Predictive performance is evaluated by comparing the ridge and telescoping predictions with the observed test outcomes. For reference, the same metrics are calculated for the original neural network. The table reports the mean and standard deviation across experimental runs.
+
+```{r}
+performance_mean <- aggregate(
+  all_run_metrics[c("MAE", "fwd_MAE", "RMSE", "fwd_RMSE", "MAPE", "fwd_MAPE", "Q95", "fwd_Q95")],
+  by = all_run_metrics[c("method", "Dataset")],
+  FUN = mean
+)
+
+performance_sd <- aggregate(
+  all_run_metrics[c("MAE", "fwd_MAE", "RMSE", "fwd_RMSE", "MAPE", "fwd_MAPE", "Q95", "fwd_Q95")],
+  by = all_run_metrics[c("method", "Dataset")],
+  FUN = sd
+)
+
+performance_summary <- merge(
+  performance_mean,
+  performance_sd,
+  by = c("method", "Dataset"),
+  suffixes = c("_mean", "_sd")
+)
+
+performance_table <- data.frame(
+  Method = performance_summary$method,
+  Dataset = performance_summary$Dataset,
+  MAE = sprintf("%.3f (%.3f)", performance_summary$MAE_mean, performance_summary$MAE_sd),
+  `NN MAE` = sprintf("%.3f (%.3f)", performance_summary$fwd_MAE_mean, performance_summary$fwd_MAE_sd),
+  RMSE = sprintf("%.4f (%.4f)", performance_summary$RMSE_mean, performance_summary$RMSE_sd),
+  `NN RMSE` = sprintf("%.3f (%.3f)", performance_summary$fwd_RMSE_mean, performance_summary$fwd_RMSE_sd),
+  MAPE = sprintf("%.3f (%.3f)", performance_summary$MAPE_mean, performance_summary$MAPE_sd),
+  `NN MAPE` = sprintf("%.3f (%.3f)", performance_summary$fwd_MAPE_mean, performance_summary$fwd_MAPE_sd),
+  Q95 = sprintf("%.3f (%.3f)", performance_summary$Q95_mean, performance_summary$Q95_sd),
+  `NN Q95` = sprintf("%.3f (%.3f)", performance_summary$fwd_Q95_mean, performance_summary$fwd_Q95_sd)
+)
+
+table_output <- kable(
+  performance_table,
+  caption = "Predictive performance across runs: mean (sd)",
+  align = c("l", "l", rep("r", 8))
+)
+
+kable_styling(
+  table_output,
+  full_width = TRUE,
+  font_size = 14
+)
+```
+
+## 2.1 Paired MAPE comparison
+
+The paired MRE plots provide a run-level comparison with the original neural network. The dashed diagonal represents equal performance. Points above the diagonal indicate that the corresponding ridge or telescoping model achieved a lower MRE.
+
+```{r, fig.width=12, fig.height=4.5}
+plot_mre <- function(method_name, label, no_y = FALSE) {
+  data <- subset(all_run_metrics, method == method_name)
+
+  ggplot(data, aes(x = MAPE, y = fwd_MAPE, color = Dataset)) +
+    geom_abline(linetype = "dashed", linewidth = 0.8) +
+    geom_point(size = 2.4, alpha = 0.8) +
+    scale_color_manual(
+      values = c("California" = "#176473", "Concrete" = "#9CCBD1")
+    ) +
+    labs(
+      title = paste(label, "vs NN"),
+      x = paste(label, "MAPE"),
+      y = if (no_y) "" else "NN MAPE",
+      color = NULL
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      legend.position = c(0.8, 0.2),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "#9ca3af", fill = NA, linewidth = 0.8),
+      axis.text = element_text(, size = 8),
+    )
+}
+combined_mre_plot = grid.arrange(plot_mre("ridge", "Ridge"), plot_mre("tel", "Telescoping",TRUE), ncol = 2)
+```
+
+# 3. Approximation agreement
+
+Approximation agreement is evaluated by treating the original neural network predictions as the reference. The approximation errors are therefore the difference between the neural network predictions and their ridge or telescoping smoother approximations, rather than their difference from the observed outcomes.
+
+```{r}
+approximation_mean <- aggregate(
+  all_run_metrics[c("approx_MAE", "approx_RMSE", "approx_MAPE", "approx_Q95")],
+  by = all_run_metrics[c("method", "Dataset")],
+  FUN = mean
+)
+
+approximation_sd <- aggregate(
+  all_run_metrics[c("approx_MAE", "approx_RMSE", "approx_MAPE", "approx_Q95")],
+  by = all_run_metrics[c("method", "Dataset")],
+  FUN = sd
+)
+
+approximation_summary <- merge(
+  approximation_mean,
+  approximation_sd,
+  by = c("method", "Dataset"),
+  suffixes = c("_mean", "_sd")
+)
+
+approximation_table <- data.frame(
+  Method = approximation_summary$method,
+  Dataset = approximation_summary$Dataset,
+  `Approx. MAE` = sprintf("%.3f (%.3f)", approximation_summary$approx_MAE_mean, approximation_summary$approx_MAE_sd),
+  `Approx. RMSE` = sprintf("%.3f (%.3f)", approximation_summary$approx_RMSE_mean, approximation_summary$approx_RMSE_sd),
+  `Approx. MAPE` = sprintf("%.3f (%.3f)", approximation_summary$approx_MAPE_mean, approximation_summary$approx_MAPE_sd),
+  `Approx. Q95` = sprintf("%.3f (%.3f)", approximation_summary$approx_Q95_mean, approximation_summary$approx_Q95_sd)
+)
+
+table_output <- kable(
+  approximation_table,
+  caption = "Approximation quality across runs: mean (sd)",
+  align = c("l", "l", rep("r", 4))
+)
+
+kable_styling(
+  table_output,
+  full_width = TRUE,
+  font_size = 14
+)
+```
+
+## 3.1 Run-level Boxplot
+
+The boxplots show the distribution of approximation RMSE across runs and therefore capture variation arising from the experimental configurations, data splits, and network initializations.
+
+```{r, fig.width=12, fig.height=4.5}
+boxplot_data <- all_run_metrics
+boxplot_data$method <- factor(boxplot_data$method, levels = c("ridge", "tel"))
+boxplot_data$Dataset <- factor(boxplot_data$Dataset, levels = c("California", "Concrete"))
+
+plot_boxplot <- function(data, dataset_name, no_y = FALSE) {
+  ggplot(
+    subset(data, Dataset == dataset_name),
+    aes(x = method, y = approx_RMSE, fill = method)
+  ) +
+    geom_boxplot(alpha = 0.8, width = 0.6, outlier.alpha = 0.5) +
+    scale_fill_manual(values = c("ridge" = "#176473", "tel" = "#9CCBD1")) +
+    scale_x_discrete(labels = c("ridge" = "Ridge", "tel" = "Telescoping")) +
+    labs(
+      title = paste(dataset_name, "dataset"),
+      x = "Smoother",
+      y = if (no_y) "" else "Approximation RMSE",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(hjust = 0),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "#9ca3af", fill = NA, linewidth = 0.8)
+    )
+}
+
+boxplot_plots <- grid.arrange(plot_boxplot(boxplot_data, "California"),plot_boxplot(boxplot_data, "Concrete", no_y = TRUE),ncol = 2)
+```
+
+## 3.2 Predcition-level scatterplot
+
+The prediction-agreement plots provide an observation-level analysis. Points close to the diagonal indicate strong agreement between the approximation and the original neural network.
+
+```{r, fig.width=12, fig.height=6.5}
+#Combine predctions across all runs
+get_predictions <- function(results, dataset, method, get_lambda = FALSE) {
+  prediction_lengths <- lengths(lapply(results, `[[`, "pred_fwd"))
+
+  out <- data.frame(
+    dataset = dataset,
+    run = rep(seq_along(results), prediction_lengths),
+    y_test = unlist(lapply(results, `[[`, "y_test")),
+    pred_fwd = unlist(lapply(results, `[[`, "pred_fwd")),
+    pred_model = unlist(lapply(results, `[[`, paste0("pred_", method)))
+  )
+
+  if (get_lambda) {
+    out$lambda_best <- rep(
+      unlist(lapply(results, function(x) x$config$lambda_best)),
+      prediction_lengths
+    )
+  }
+
+  out
+}
+
+prediction_comparison_ridge <- rbind(
+  get_predictions(results_california_ridge, "california", "ridge", TRUE),
+  get_predictions(results_concrete_ridge, "concrete", "ridge", TRUE)
+)
+
+prediction_comparison_tel <- rbind(
+  get_predictions(results_california_tel, "california", "tel"),
+  get_predictions(results_concrete_tel, "concrete", "tel")
+)
+
+
+#Create plots
+plot_agreement <- function(data, dataset_name, method_name, no_y = FALSE, no_title = FALSE) {
+  ggplot(
+    subset(data, dataset == dataset_name),
+    aes(x = pred_model, y = pred_fwd)
+  ) +
+    geom_point(alpha = 0.50, size = 0.7, color = "#B2182B") +
+    geom_abline(slope = 1,intercept = 0, linetype = "dashed", linewidth = 0.8) +
+    labs(
+      title = if (no_title) "" else paste(tools::toTitleCase(dataset_name), "dataset"),
+      y = if (no_y) "" else "NN prediction",
+      x = paste(method_name, "prediction")
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "#9ca3af", fill = NA, linewidth = 0.8),
+    )
+}
+
+scatter_plots = grid.arrange(
+   plot_agreement(prediction_comparison_ridge, "california", "Ridge"),
+   plot_agreement(prediction_comparison_ridge, "concrete", "Ridge", TRUE),
+   plot_agreement(prediction_comparison_tel, "california", "Telescoping", FALSE, TRUE),
+   plot_agreement(prediction_comparison_tel, "concrete", "Telescoping", TRUE, TRUE),
+  ncol = 2,
+  nrow = 2
+)
+
+```

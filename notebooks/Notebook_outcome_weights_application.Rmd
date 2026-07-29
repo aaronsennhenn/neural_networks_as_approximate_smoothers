@@ -1,0 +1,135 @@
+---
+title: "Outcome Weights Application"
+author: "Aaron Sennhenn"
+date: ""
+output:
+  html_document:
+    toc: true
+    toc_float: true
+subtitle: "Neural Networks as Approximate Smoothers"
+---
+
+This notebook produces the resutts and figure of Chapter 5. It adapts the 401(k) application notebook of Knaus (2024) and thus keeps largely keeps it structure and comments. It utilizes functions of the OutcomeWeights package by replacing the nuissance estimator by the ridge smoother estimator considered in the thesis.
+
+First, load packages and set the seed:
+
+```{r setup, include=FALSE}
+#SET ROOT DIRECTORY
+knitr::opts_knit$set(
+  root.dir = "C:/Users/aaron/OneDrive/Desktop/Data Science Studium/Master Thesis/R/repo/")
+```
+
+```{r, message = FALSE, warning=FALSE}
+set.seed(42)
+if (!require("OutcomeWeights")) install.packages("OutcomeWeights", dependencies = TRUE); library(OutcomeWeights)
+if (!require("hdm")) install.packages("hdm", dependencies = TRUE); library(hdm)
+if (!require("grf")) install.packages("grf", dependencies = TRUE); library(grf)
+if (!require("cobalt")) install.packages("cobalt", dependencies = TRUE); library(cobalt)
+if (!require("tidyverse")) install.packages("tidyverse", dependencies = TRUE); library(tidyverse)
+if (!require("viridis")) install.packages("viridis", dependencies = TRUE); library(viridis)
+if (!require("gridExtra")) install.packages("gridExtra", dependencies = TRUE); library(gridExtra)
+if (!require("torch")) install.packages("torch", dependencies = TRUE); library(torch)
+```
+
+Load custom neural network OutcomeWeights functions:
+
+```{r}
+source("src/application/functions_ridge_application.R")
+source("src/application/NuPa_neural_net.R")
+source("src/application/dml_with_smoother_neural_net.R")
+```
+
+Next, load the data. Here we use the 401(k) data of the `hdm` package.
+
+```{r}
+data(pension) # Find variable description if you type ?pension in console
+
+# Treatment
+D = pension$p401
+# Instrument
+Z = pension$e401
+# Outcome
+Y = pension$net_tfa
+# Controls
+X = model.matrix(~ 0 + age + db + educ + fsize + hown + inc + male + marr + pira + twoearn, data = pension)
+var_nm = c("Age","Benefit pension","Education","Family size","Home owner","Income","Male","Married","IRA","Two earners")
+colnames(X) = var_nm
+```
+
+## 1. Run Double ML
+
+### 2-folds
+
+Run double ML also with 2-fold cross-fitting:
+
+```{r}
+# 2 folds
+set.seed(42)
+dml_2f = dml_with_smoother_neural_net(Y,D,X,Z,
+                           n_cf_folds = 2, estimators = c("PLR","PLR_IV"))
+results_dml_2f = summary(dml_2f)
+plot(dml_2f)
+```
+
+Use the `get_outcome_weights()` method to extract the outcome weights. By design the ridge smoother representation will hold exactly.
+
+```{r}
+omega_dml_2f = get_outcome_weights(dml_2f)
+cat("ω'Y replicates point etimates?", 
+    all.equal(as.numeric(omega_dml_2f$omega %*% Y),
+      as.numeric(results_dml_2f[,1])
+    ))
+```
+
+### 5-fold
+
+Run double ML also with 5-fold cross-fitting:
+
+```{r}
+# 5 folds
+set.seed(42)
+dml_5f = dml_with_smoother_neural_net(Y,D,X,Z,
+                           n_cf_folds = 5, estimators = c("PLR","PLR_IV"))
+results_dml_5f = summary(dml_5f)
+plot(dml_5f)
+```
+
+```{r}
+omega_dml_5f = get_outcome_weights(dml_5f)
+cat("ω'Y replicates point etimates?", 
+    all.equal(as.numeric(omega_dml_5f$omega %*% Y),
+      as.numeric(results_dml_5f[,1])
+    ))
+```
+
+## 2. Check covariate balancing
+
+Use the infrastructure of the `cobalt` package to plot Standardized Mean Differences where we need to flip the sign of the untreated outcome weights to make them compatible with the package framework. This is achieved by multiplying the outcome weights by $2 \times D-1$.
+
+```{r, fig.width=12, fig.height=4.5}
+threshold = 0.1
+
+create_love_plot = function(title, index) {
+  love.plot(
+    D ~ X,
+    weights = list(
+      "2-fold" = omega_dml_2f$omega[index, ] * (2*D-1),
+      "5-fold" = omega_dml_5f$omega[index, ] * (2*D-1)
+    ),
+    position = "bottom",
+    title = title,
+    thresholds = c(m = threshold),
+    var.order = "unadjusted",
+    binary = "std",
+    abs = TRUE,
+    line = TRUE,
+    colors = viridis(3), # color-blind-friendly
+    shapes = c("circle", "triangle", "diamond")
+  )
+}
+
+# Create plot that end up in Chapter 5
+love_plot_plr = create_love_plot("PLR", 1)
+love_plot_plriv = create_love_plot("PLR-IV", 2)
+loveplot = grid.arrange(love_plot_plr, love_plot_plriv, ncol = 2)
+```
